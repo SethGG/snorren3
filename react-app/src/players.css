@@ -1,0 +1,43 @@
+.players {
+  --d: 4em;
+  /* image size */
+  --rel: calc(24/(var(--m)*var(--m)));
+  /* how much extra space we want between images, 1 = one image size */
+  --r: calc(.5*(1 + var(--rel))*var(--d)/var(--tan));
+  /* circle radius */
+  --s: calc(2*var(--r) + var(--d));
+  /* container size */
+  position: relative;
+  width: calc(var(--s) + 2em);
+  height: calc(var(--s) + 2em);
+  border-radius: 50%;
+}
+
+.players div {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: calc(-.5*var(--d));
+  width: var(--d);
+  height: var(--d);
+  --az: calc(var(--i)*1turn/var(--m));
+  transform: rotate(var(--az)) rotate(-90deg) translate(var(--r)) rotate(calc(-1*var(--az))) rotate(90deg);
+}
+
+.fire-img {
+  height: var(--d);
+  width: auto;
+}
+
+.role-img {
+  height: 1.8em;
+  width: auto;
+}
+
+.burg-img {
+  height: 1.6em;
+  width: auto;
+  position: fixed;
+  left: -10%;
+  bottom: 35%;
+}
