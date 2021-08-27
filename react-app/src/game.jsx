@@ -6,7 +6,7 @@ function Game() {
       <div className="container is-max-desktop">
         <div className="columns is-mobile is-multiline is-centered">
           <div className="column is-narrow" id="players">
-            <Players info={[]} />
+            <Players info={[{name:"Henk"}, {name:"Fleur"}, {name:"Daniël"}, {name:"Marnix"}]} />
           </div>
           <div className="column is-full-touch" id="phase">
           </div>
