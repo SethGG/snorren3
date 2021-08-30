@@ -1,9 +1,13 @@
+@import 'bulma/css/bulma.css';
+
 .players {
   --d: 4em;
   /* image size */
-  --rel: calc(24/(var(--m)*var(--m)));
+  --rel_temp: calc(var(--m)*var(--m));
+  --rel: calc(24/var(--rel_temp));
   /* how much extra space we want between images, 1 = one image size */
-  --r: calc(.5*(1 + var(--rel))*var(--d)/var(--tan));
+  --r_temp: calc(1 + var(--rel));
+  --r: calc(.5*var(--r_temp)*var(--d)/var(--tan));
   /* circle radius */
   --s: calc(2*var(--r) + var(--d));
   /* container size */

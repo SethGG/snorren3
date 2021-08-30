@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
-import Game from './game';
-import 'bulma/css/bulma.css';
+import Game from './components/game';
+import './index.css';
 
 ReactDOM.render(
   <React.StrictMode>

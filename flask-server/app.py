@@ -2,7 +2,8 @@ from flask import Flask, render_template
 
 app = Flask(__name__,
             template_folder='../react-app/build',
-            static_folder='../react-app/build/static')
+            static_folder='../react-app/build',
+            static_url_path='')
 
 @app.route("/")
 def index():
