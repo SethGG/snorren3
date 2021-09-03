@@ -45,3 +45,9 @@
   left: -10%;
   bottom: 35%;
 }
+
+@media screen and (max-width: 1024px) {
+  .container {
+      max-width: 705px;
+  }
+}
