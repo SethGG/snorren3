@@ -1,33 +1,144 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, APIRouter, WebSocket, HTTPException, WebSocketDisconnect, Query, status, Depends, Path
 from fastapi.staticfiles import StaticFiles
-from typing import Optional
+from fastapi.security import APIKeyQuery
+from typing import Type
 import uuid
 import os
 
 
 app = FastAPI()
 
-class SingePageApplication(StaticFiles):
-    def __init__(self, directory: os.PathLike, index="index.html"):
-        self.index = index
-        super().__init__(directory=directory, packages=None, html=True, check_dir=True)
+class Guest:
+    def __init__(self, id_obj: uuid.UUID, ws: WebSocket, game: 'Game'):
+        self.id_obj = id_obj
+        self.ws = ws
+        self.game = game
+        self.spectator = False
 
-    async def lookup_path(self, path: str):
-        full_path, stat_result = await super().lookup_path(path)
-        if stat_result is None:
-            return await super().lookup_path(self.index)
+    player_info = "You don't know shit about players"
+    phase_info = "You don't know shit about the phase"
 
-        return (full_path, stat_result)
+class Player:
+    def __init__(self, name: str, id_obj: uuid.UUID, ws: WebSocket, game: 'Game'):
+        self.name = Name
+        self.id_obj = id_obj
+        self.ws = ws
+        self.game = game
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, id: Optional[str] = Query(None)):
-    await websocket.accept()
-    id = str(uuid.uuid4())
-    await websocket.send_json({"event": "id", "data": id})
+    @classmethod
+    def fromGuest(cls: Type['Player'], guest: Guest, name: str):
+        return cls(name, guest.id_obj, guest.ws, guest.game)
+
+    player_info = "Player Yeet"
+    phase_info = "Phase Yeet"
+
+class Game:
+    def __init__(self):
+        self.players = {}
+        self.guests = {}
+
+games = {"kaas": Game()}
+
+###################
+# HTTP API Routes #
+###################
+
+websocket_id = APIKeyQuery(name="id", description="WebSocket Connection ID")
+
+async def get_game(game_name: str = Path(..., title="Game Name")):
+    if game_name not in games:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return games[game_name]
+
+async def get_player(game = Depends(get_game), id: str = Depends(websocket_id)):
     try:
-        while True:
-            data = await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
+        id_obj = uuid.UUID(id, version=4)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid ID")
+    for player in game.players.values():
+        if player.id_obj == id_obj:
+            return player
+    else:
+        raise HTTPException(status_code=403, detail="No user found with provided ID")
 
-app.mount(path="/", app=SingePageApplication(directory="../react-app/build"), name="SPA")
+
+home_router = APIRouter(prefix="/api", tags=["Home Page"])
+
+@home_router.get("/games")
+async def get_games():
+    return "yeet"
+
+@home_router.post("/games")
+async def create_game():
+    pass
+
+game_router = APIRouter(prefix="/api/games", tags=["Game Page"])
+
+@game_router.post("/{game_name}")
+async def join_game():
+    pass
+
+@game_router.get("/{game_name}/players")
+async def get_player_data(player: Player = Depends(get_player)):
+    return player.player_info
+
+@game_router.get("/{game_name}/phase")
+async def get_phase_data(player: Player = Depends(get_player)):
+    return player.phase_info
+
+@game_router.post("/{game_name}/phase")
+async def post_phase_data():
+    pass
+
+app.include_router(home_router)
+app.include_router(game_router)
+
+########################
+# WebSocket API Routes #
+########################
+
+async def ws_extract_id(websocket: WebSocket, id: str = Query(None)):
+    id_obj = None
+    try:
+        id_obj = uuid.UUID(id, version=4)
+    except TypeError:
+        id_obj = uuid.uuid4()
+    except ValueError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    return id_obj
+
+async def ws_extract_game(websocket: WebSocket, game_name: str = Path(...)):
+    if game_name not in games:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return None
+    return games[game_name]
+
+@app.websocket("/ws/{game_name}")
+async def game_websocket(websocket: WebSocket, id_obj: uuid.UUID = Depends(ws_extract_id), game: Game = Depends(ws_extract_game)):
+    if id_obj and game:
+        await websocket.accept()
+        await websocket.send_json({"event": "id", "data": id_obj.hex})
+        game.guests[id_obj] = Guest(id_obj, websocket, game)
+        try:
+            await websocket.receive_json()
+        except WebSocketDisconnect:
+            print("ws disconnect")
+            pass
+
+##########################
+# Serve Static React App #
+##########################
+
+# class SingePageApplication(StaticFiles):
+#     def __init__(self, directory: os.PathLike, index="index.html"):
+#         self.index = index
+#         super().__init__(directory=directory, packages=None, html=True, check_dir=True)
+#
+#     async def lookup_path(self, path: str):
+#         full_path, stat_result = await super().lookup_path(path)
+#         if stat_result is None:
+#             return await super().lookup_path(self.index)
+#
+#         return (full_path, stat_result)
+#
+# app.mount(path="/", app=SingePageApplication(directory="../react-app/build"), name="SPA")

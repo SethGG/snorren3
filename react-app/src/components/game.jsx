@@ -1,32 +1,41 @@
 import {useEffect, useState, useRef} from 'react';
-import ReconnectingWebSocket from 'reconnecting-websocket';
 import Players from './players'
 import Join from './join'
 
-const WebSocketWrapper = function(url) {
-  const ws = new ReconnectingWebSocket(url);
+const WebSocketWrapper = function(url_func) {
+  let ws;
+  let should_reconnect = true;
   const callbacks = {};
+
+  const startWebSocket = () => {
+    ws = new WebSocket(url_func());
+    ws.onmessage = (evt) => {
+      const json = JSON.parse(evt.data);
+      dispatch(json.event, json.data);
+    };
+    ws.onclose = () => {
+      dispatch('close', null);
+      setTimeout(startWebSocket, 5000);
+    };
+    ws.onopen = () => {
+      dispatch('open', null);
+    };
+  };
+
+  startWebSocket();
 
   this.bind = (event_name, callback) => {
     callbacks[event_name] = callbacks[event_name] || [];
     callbacks[event_name].push(callback);
   };
-
   this.send = (event_name, event_data) => {
     const payload = JSON.stringify({event: event_name, data: event_data});
     ws.send(payload);
   };
-
-  this.close = () => {ws.close()};
-  this.reconnect = () => {ws.reconnect()};
-
-  ws.onmessage = (evt) => {
-    const json = JSON.parse(evt.data);
-    dispatch(json.event, json.data);
+  this.close = () => {
+    should_reconnect = false;
+    ws.close();
   };
-
-  ws.onclose = () => {dispatch('close', null)};
-  ws.onopen = () => {dispatch('open', null)};
 
   const dispatch = (event_name, message) => {
     const chain = callbacks[event_name];
@@ -38,13 +47,14 @@ const WebSocketWrapper = function(url) {
 const Game = () => {
   console.log("game render");
   const [websocket, setWebSocket] = useState(null);
-  const connection_id = useRef(null);
+  const con_id = useRef(null);
 
   useEffect(() => {
-    const ws = new WebSocketWrapper(() => `ws://${window.location.host}/ws?id=${connection_id.current}`);
+    const ws = new WebSocketWrapper( () => (
+      `ws://${window.location.host}/ws` + (con_id.current ? `?id=${con_id.current}` : '')));
     ws.bind('id', (data) => {
       console.log(data);
-      connection_id.current = data;
+      con_id.current = data;
     });
     setWebSocket(ws);
     return () => websocket.close();
