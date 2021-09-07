@@ -1,6 +1,8 @@
 from fastapi import FastAPI, APIRouter, WebSocket, HTTPException, WebSocketDisconnect, Query, status, Depends, Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyQuery
+from starlette.types import Receive, Scope, Send
+from starlette.responses import Response
 from typing import Type
 import uuid
 import os
@@ -113,7 +115,7 @@ async def ws_extract_game(websocket: WebSocket, game_name: str = Path(...)):
         return None
     return games[game_name]
 
-@app.websocket("/ws/{game_name}")
+@app.websocket("/{game_name}")
 async def game_websocket(websocket: WebSocket, id_obj: uuid.UUID = Depends(ws_extract_id), game: Game = Depends(ws_extract_game)):
     if id_obj and game:
         await websocket.accept()
@@ -129,16 +131,11 @@ async def game_websocket(websocket: WebSocket, id_obj: uuid.UUID = Depends(ws_ex
 # Serve Static React App #
 ##########################
 
-# class SingePageApplication(StaticFiles):
-#     def __init__(self, directory: os.PathLike, index="index.html"):
-#         self.index = index
-#         super().__init__(directory=directory, packages=None, html=True, check_dir=True)
-#
-#     async def lookup_path(self, path: str):
-#         full_path, stat_result = await super().lookup_path(path)
-#         if stat_result is None:
-#             return await super().lookup_path(self.index)
-#
-#         return (full_path, stat_result)
-#
-# app.mount(path="/", app=SingePageApplication(directory="../react-app/build"), name="SPA")
+class SPAStaticFiles(StaticFiles):
+    async def lookup_path(self, path: str):
+        full_path, stat_result = await super().lookup_path(path)
+        if stat_result is None:
+            return await super().lookup_path("index.html")
+        return (full_path, stat_result)
+
+app.mount("/", SPAStaticFiles(directory="../react-app/build", html=True), name="SPA")
