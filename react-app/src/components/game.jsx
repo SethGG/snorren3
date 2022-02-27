@@ -61,7 +61,7 @@ const Game = () => {
   }, []);
 
   return (
-    <section className="section">
+    <section className="section is-medium">
       <div className="container is-max-desktop">
         <div className="columns is-mobile is-multiline is-centered">
           <div className="column is-narrow" id="players">

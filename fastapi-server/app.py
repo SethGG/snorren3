@@ -3,6 +3,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyQuery
 from starlette.types import Receive, Scope, Send
 from starlette.responses import Response
+from starlette.applications import Starlette
+from starlette.routing import Mount
 from typing import Type
 import uuid
 import os
@@ -64,31 +66,31 @@ async def get_player(game = Depends(get_game), id: str = Depends(websocket_id)):
         raise HTTPException(status_code=403, detail="No user found with provided ID")
 
 
-home_router = APIRouter(prefix="/api", tags=["Home Page"])
+home_router = APIRouter(prefix="/games", tags=["Home Page"])
 
-@home_router.get("/games")
+@home_router.get("/")
 async def get_games():
     return "yeet"
 
-@home_router.post("/games")
+@home_router.post("/")
 async def create_game():
     pass
 
-game_router = APIRouter(prefix="/api/games", tags=["Game Page"])
+game_router = APIRouter(prefix="/games/{game_name}", tags=["Game Page"])
 
-@game_router.post("/{game_name}")
+@game_router.post("/")
 async def join_game():
     pass
 
-@game_router.get("/{game_name}/players")
+@game_router.get("/players")
 async def get_player_data(player: Player = Depends(get_player)):
     return player.player_info
 
-@game_router.get("/{game_name}/phase")
+@game_router.get("/phase")
 async def get_phase_data(player: Player = Depends(get_player)):
     return player.phase_info
 
-@game_router.post("/{game_name}/phase")
+@game_router.post("/phase")
 async def post_phase_data():
     pass
 
@@ -138,4 +140,9 @@ class SPAStaticFiles(StaticFiles):
             return await super().lookup_path("index.html")
         return (full_path, stat_result)
 
-app.mount("/", SPAStaticFiles(directory="../react-app/build", html=True), name="SPA")
+routes = [
+    Mount('/api', app=app, name="api"),
+    Mount('/', StaticFiles(directory="../react-app/build", html=True), name="SPA")
+]
+
+star = Starlette(routes=routes)
