@@ -51,7 +51,7 @@ const Game = () => {
 
   useEffect(() => {
     const ws = new WebSocketWrapper( () => (
-      `ws://${window.location.host}/ws` + (con_id.current ? `?id=${con_id.current}` : '')));
+      `ws://${window.location.host}/kaas` + (con_id.current ? `?id=${con_id.current}` : '')));
     ws.bind('id', (data) => {
       console.log(data);
       con_id.current = data;
