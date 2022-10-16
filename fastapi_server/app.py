@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from fastapi.responses import JSONResponse
 from typing import List
-from sqlalchemy import delete, func, or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from dataclasses import dataclass, field
@@ -12,6 +12,7 @@ from starlette.exceptions import WebSocketException
 import uuid
 import asyncio
 import datetime
+import time
 
 from . import models, schemas
 from .database import SessionLocal, engine
@@ -26,7 +27,7 @@ games = {}
 @dataclass
 class Game:
     connections: dict = field(default_factory=dict)
-    empty_since: datetime.datetime = field(default_factory=datetime.datetime.now())
+    inactive_since: datetime.datetime = field(default_factory=datetime.datetime.now)
 
 
 # @dataclass
@@ -85,11 +86,12 @@ def get_connection(game: models.Game = Depends(get_game), id: str = Depends(webs
 
 
 @app.on_event("startup")
-def restore_games():
+async def restore_games():
     with SessionLocal() as db:
         db_games = db.query(models.Game).all()
         for game in db_games:
             games[game.name] = Game()
+            await asyncio.create_task(game_inactivity_timer(game.name, 10))
 
 # Root Routes #
 
@@ -112,6 +114,14 @@ def create_game(game: schemas.GameCreate, db: Session = Depends(get_db)):
     db.commit()
     games[game.name] = Game()
     return db_game
+
+
+@root_router.get("/test")
+def test():
+    print("yeet1")
+    time.sleep(10)
+    print("yeet2")
+    return
 
 
 # Game Routes #
@@ -160,6 +170,21 @@ app.include_router(game_router)
 ########################
 
 
+async def game_inactivity_timer(game_name, seconds):
+    if game_name in games and games[game_name].inactive_since:
+        print("inactivity timer started for %s" % game_name)
+        await asyncio.sleep(seconds)
+        if games[game_name].inactive_since and datetime.datetime.now() - \
+                games[game_name].inactive_since > datetime.timedelta(seconds=seconds):
+            with SessionLocal() as db:
+                db.query(models.Game).filter(models.Game.name == game_name).delete()
+                db.commit()
+                del games[game_name]
+            print("%s removed" % game_name)
+        else:
+            print("inactivity timer cancelled for %s" % game_name)
+
+
 async def ws_extract_game(websocket: WebSocket, game_name: str = Path(...)):
     """
     Takes the websocket object and game name provided in the path and returns the in-memory game
@@ -187,7 +212,7 @@ async def ws_extract_id(websocket: WebSocket, id: str = Cookie(None),
 
 @app.websocket("/{game_name}")
 async def game_websocket(websocket: WebSocket, id: uuid.UUID = Depends(ws_extract_id),
-                         game: Game = Depends(ws_extract_game)):
+                         game: Game = Depends(ws_extract_game), game_name: str = Path(...)):
     await websocket.accept()
     await websocket.send_json({"event": "id", "data": id.hex})
     game.connections[id] = websocket
@@ -197,17 +222,22 @@ async def game_websocket(websocket: WebSocket, id: uuid.UUID = Depends(ws_extrac
     except WebSocketDisconnect:
         print("ws disconnect")
         with SessionLocal() as db:
-            db_connection = db.query(models.GameConnection).join(models.GameConnection.game) \
-                .outerjoin(models.GameConnection.player) \
-                .filter(models.GameConnection.conn_id == id.hex,
-                        or_(models.Player.name == None, models.Game.in_progress == 0)) \
-                .one_or_none()
+            db_connection = \
+                db.query(models.GameConnection, models.Game.in_progress, models.Player.name) \
+                .join(models.GameConnection.game).outerjoin(models.GameConnection.player) \
+                .filter(models.GameConnection.conn_id == id.hex).one_or_none()
             if db_connection:
-                db.delete(db_connection)
-                db.commit()
-                del game.connections[id]
+                if not db_connection.in_progress or not db_connection.name:
+                    db.delete(db_connection.GameConnection)
+                    db.commit()
+                    del game.connections[id]
+                else:
+                    game.connections[id] = None
             else:
-                game.connections[id] = None
+                del game.connections[id]
+            if not game.connections.values():
+                game.inactive_since = datetime.datetime.now()
+                await asyncio.create_task(game_inactivity_timer(game_name, 10))
 
 
 ##########################

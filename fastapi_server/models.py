@@ -13,7 +13,7 @@ class Game(Base):
     day_number = Column(Integer, default=1)
 
     connections = relationship("GameConnection", back_populates="game", cascade="all, delete",)
-    players = relationship("Player", back_populates="game")
+    players = relationship("Player", back_populates="game", cascade="all, delete",)
 
 
 class GameConnection(Base):
