@@ -5,10 +5,12 @@ from fastapi.security import APIKeyCookie
 from fastapi.responses import JSONResponse
 from typing import List
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.future import select
 from dataclasses import dataclass, field
 from starlette.exceptions import WebSocketException
+from json.decoder import JSONDecodeError
 import uuid
 import asyncio
 import datetime
@@ -16,8 +18,6 @@ import time
 
 from . import models, schemas
 from .database import SessionLocal, engine
-
-models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -29,6 +29,31 @@ class Game:
     connections: dict = field(default_factory=dict)
     inactive_since: datetime.datetime = field(default_factory=datetime.datetime.now)
 
+    async def on_connect(self, ws: WebSocket, id: uuid.UUID):
+        if id in self.connections and self.connections[id]:
+            raise WebSocketException(code=1008, reason="ID already in use")
+        await ws.accept()
+        await ws.send_json({"event": "id", "data": id.hex})
+        self.connections[id] = ws
+
+  #  async def on_join(self, id: uuid)
+
+    async def on_disconnect(self, id: uuid.UUID, db: AsyncSession):
+        query = select(models.GameConnection, models.Game.in_progress, models.Player.name) \
+            .join(models.GameConnection.game).outerjoin(models.GameConnection.player) \
+            .filter(models.GameConnection.conn_id == id.hex)
+        result = await db.execute(query)
+        db_connection = result.one_or_none()
+        print(db_connection)
+        if db_connection:
+            if not db_connection.in_progress or not db_connection.name:
+                db.delete(db_connection.GameConnection)
+                await db.commit()
+                del self.connections[id]
+            else:
+                self.connections[id] = None
+        else:
+            del self.connections[id]
 
 # @dataclass
 # class Connection:
@@ -58,40 +83,44 @@ websocket_id = APIKeyCookie(name="id", description="WebSocket Connection ID")
 # Dependancies #
 
 
-def get_db():
-    db = SessionLocal()
-    print("!!! new session !!!")
-    try:
-        yield db
-    finally:
-        db.close()
+# def get_db():
+#     db = SessionLocal()
+#     print("!!! new session !!!")
+#     try:
+#         yield db
+#     finally:
+#         db.close()
 
 
-def get_game(game_name: str = Path(..., title="Game Name"), db: Session = Depends(get_db)):
-    db_game = db.query(models.Game).get(game_name)
-    if not db_game:
-        raise HTTPException(status_code=404, detail="Game not found")
-    return db_game
+# def get_game(game_name: str = Path(..., title="Game Name"), db: Session = Depends(get_db)):
+#     db_game = db.query(models.Game).get(game_name)
+#     if not db_game:
+#         raise HTTPException(status_code=404, detail="Game not found")
+#     return db_game
 
 
-def get_connection(game: models.Game = Depends(get_game), id: str = Depends(websocket_id)):
-    try:
-        id_obj = uuid.UUID(id, version=4)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Not authenticated")
-    if id_obj in games[game.name].connections:
-        return id_obj
-    else:
-        raise HTTPException(status_code=403, detail="Not authenticated")
+# def get_connection(game: models.Game = Depends(get_game), id: str = Depends(websocket_id)):
+#     try:
+#         id_obj = uuid.UUID(id, version=4)
+#     except ValueError:
+#         raise HTTPException(status_code=403, detail="Not authenticated")
+#     if id_obj in games[game.name].connections:
+#         return id_obj
+#     else:
+#         raise HTTPException(status_code=403, detail="Not authenticated")
 
 
 @app.on_event("startup")
-async def restore_games():
-    with SessionLocal() as db:
-        db_games = db.query(models.Game).all()
-        for game in db_games:
-            games[game.name] = Game()
-            await asyncio.create_task(game_inactivity_timer(game.name, 10))
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(models.Base.metadata.create_all)
+    async with SessionLocal() as db:
+        async with db.begin():
+            query = select(models.Game)
+            result = await db.execute(query)
+            for game in result.scalars().all():
+                games[game.name] = Game()
+        #         await asyncio.create_task(game_inactivity_timer(game.name, 10))
 
 # Root Routes #
 
@@ -99,50 +128,52 @@ async def restore_games():
 root_router = APIRouter(prefix="/api", tags=["Root Page"])
 
 
-@root_router.get("/games", response_model=List[schemas.Game])
-def get_games(db: Session = Depends(get_db)):
-    db_games = db.query(models.Game.name, models.Game.in_progress,
-                        func.count(models.Player.game_name).label("number_of_players")
-                        ).outerjoin(models.Player).group_by(models.Game.name).all()
-    return db_games
+# @root_router.get("/games", response_model=List[schemas.Game])
+# def get_games(db: Session = Depends(get_db)):
+#     db_games = db.query(models.Game.name, models.Game.in_progress,
+#                         func.count(models.Player.game_name).label("number_of_players")
+#                         ).outerjoin(models.Player).group_by(models.Game.name).all()
+#     return db_games
 
 
 @root_router.post("/games", response_model=schemas.GameCreate)
-def create_game(game: schemas.GameCreate, db: Session = Depends(get_db)):
-    db_game = models.Game(name=game.name)
-    db.add(db_game)
-    db.commit()
-    games[game.name] = Game()
-    return db_game
+async def create_game(game: schemas.GameCreate):
+    async with SessionLocal() as db:
+        async with db.begin():
+            db_game = models.Game(name=game.name)
+            db.add(db_game)
+            await db.commit()
+            games[game.name] = Game()
+            return db_game
 
 
-@root_router.get("/test")
-def test():
-    print("yeet1")
-    time.sleep(10)
-    print("yeet2")
-    return
+# @root_router.get("/test")
+# def test():
+#     print("yeet1")
+#     time.sleep(10)
+#     print("yeet2")
+#     return
 
 
 # Game Routes #
 
-game_router = APIRouter(prefix="/api/games", tags=["Game Page"])
+# game_router = APIRouter(prefix="/api/games", tags=["Game Page"])
 
 
-@game_router.post("/{game_name}", response_model=schemas.Player, response_model_exclude_unset=True)
-def join_game(player: schemas.PlayerCreate, game: models.Game = Depends(get_game),
-              conn_id: uuid.UUID = Depends(get_connection), db: Session = Depends(get_db)):
-    # add game connection to database
-    db_conn = models.GameConnection(conn_id=conn_id.hex, game_name=game.name)
-    db.add(db_conn)
-    response = db_conn
-    # add player to database is game is not in progress and name is provided
-    if not game.in_progress and player.name:
-        db_player = models.Player(conn_id=conn_id.hex, game_name=game.name, name=player.name)
-        db.add(db_player)
-        response = db_player
-    db.commit()
-    return response
+# @game_router.post("/{game_name}", response_model=schemas.Player, response_model_exclude_unset=True)
+# def join_game(player: schemas.PlayerCreate, game: models.Game = Depends(get_game),
+#               conn_id: uuid.UUID = Depends(get_connection), db: Session = Depends(get_db)):
+#     # add game connection to database
+#     db_conn = models.GameConnection(conn_id=conn_id.hex, game_name=game.name)
+#     db.add(db_conn)
+#     response = db_conn
+#     # add player to database is game is not in progress and name is provided
+#     if not game.in_progress and player.name:
+#         db_player = models.Player(conn_id=conn_id.hex, game_name=game.name, name=player.name)
+#         db.add(db_player)
+#         response = db_player
+#     db.commit()
+#     return response
 
 
 # @game_router.get("/{game_name}/players")
@@ -163,7 +194,7 @@ def join_game(player: schemas.PlayerCreate, game: models.Game = Depends(get_game
 #     pass
 
 app.include_router(root_router)
-app.include_router(game_router)
+# app.include_router(game_router)
 
 ########################
 # WebSocket API Routes #
@@ -203,8 +234,6 @@ async def ws_extract_id(websocket: WebSocket, id: str = Cookie(None),
     """
     try:
         id_obj = uuid.UUID(id, version=4)
-        if id_obj in game.connections and game.connections[id_obj]:
-            raise WebSocketException(code=1008, reason="ID already in use")
     except (TypeError, ValueError):
         id_obj = uuid.uuid4()
     return id_obj
@@ -213,31 +242,35 @@ async def ws_extract_id(websocket: WebSocket, id: str = Cookie(None),
 @app.websocket("/{game_name}")
 async def game_websocket(websocket: WebSocket, id: uuid.UUID = Depends(ws_extract_id),
                          game: Game = Depends(ws_extract_game), game_name: str = Path(...)):
-    await websocket.accept()
-    await websocket.send_json({"event": "id", "data": id.hex})
-    game.connections[id] = websocket
+    await game.on_connect(websocket, id)
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                data = await websocket.receive_json()
+                print(data)
+            except JSONDecodeError:
+                await websocket.send_json({"event": "error", "data": "Invalid JSON Payload"})
     except WebSocketDisconnect:
         print("ws disconnect")
-        with SessionLocal() as db:
-            db_connection = \
-                db.query(models.GameConnection, models.Game.in_progress, models.Player.name) \
-                .join(models.GameConnection.game).outerjoin(models.GameConnection.player) \
-                .filter(models.GameConnection.conn_id == id.hex).one_or_none()
-            if db_connection:
-                if not db_connection.in_progress or not db_connection.name:
-                    db.delete(db_connection.GameConnection)
-                    db.commit()
-                    del game.connections[id]
-                else:
-                    game.connections[id] = None
-            else:
-                del game.connections[id]
-            if not game.connections.values():
-                game.inactive_since = datetime.datetime.now()
-                await asyncio.create_task(game_inactivity_timer(game_name, 10))
+        async with SessionLocal() as db:
+            async with db.begin():
+                await game.on_disconnect(id, db)
+            # db_connection = \
+            #     db.query(models.GameConnection, models.Game.in_progress, models.Player.name) \
+            #     .join(models.GameConnection.game).outerjoin(models.GameConnection.player) \
+            #     .filter(models.GameConnection.conn_id == id.hex).one_or_none()
+            # if db_connection:
+            #     if not db_connection.in_progress or not db_connection.name:
+            #         db.delete(db_connection.GameConnection)
+            #         db.commit()
+            #         del game.connections[id]
+            #     else:
+            #         game.connections[id] = None
+            # else:
+            #     del game.connections[id]
+            # if not game.connections.values():
+            #     game.inactive_since = datetime.datetime.now()
+            #     await asyncio.create_task(game_inactivity_timer(game_name, 10))
 
 
 ##########################
