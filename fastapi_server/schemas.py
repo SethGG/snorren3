@@ -23,3 +23,8 @@ class Player(PlayerCreate):
 
     class Config:
         orm_mode = True
+
+
+class WsMessage(BaseModel):
+    event: str
+    data: str
