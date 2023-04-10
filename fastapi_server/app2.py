@@ -3,9 +3,11 @@ from sse_starlette import EventSourceResponse
 from pydantic import BaseModel
 from typing import Literal, Dict, List
 from sqlalchemy import select, delete
+from uvicorn.logging import ColourizedFormatter
 import asyncio
 import uuid
 import datetime
+import logging
 
 from . import database as db
 
@@ -15,6 +17,12 @@ from . import database as db
 
 app = FastAPI()
 games = {}
+
+logger = logging.getLogger(__name__)
+logger.setLevel('DEBUG')
+handler = logging.StreamHandler()
+handler.setFormatter(ColourizedFormatter("%(levelprefix)s %(message)s"))
+logger.addHandler(handler)
 
 ###################
 # PYDANTIC MODELS #
@@ -62,30 +70,63 @@ class Lobby(Phase):
 ##############
 
 
+class Connection:
+    def __init__(self, id_obj: uuid.UUID) -> None:
+        self.id_obj = id_obj
+        self.queue = asyncio.Queue()
+        self.active = True
+
+    async def listen_for_updates(self) -> GameUpdate:
+        return await self.queue.get()
+
+
 class Game:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.connections: dict = {}
-        self.inactive_since: datetime.datetime = datetime.datetime.now()
+        self.connections = {}
+        self.in_progress = False
+        self.inactive_since = datetime.datetime.now()
         self.phase = Lobby()
 
-    async def connect(self, id_obj: uuid.UUID) -> asyncio.Queue:
-        if id_obj in self.connections and self.connections[id_obj]:
-            raise HTTPException(418, "ID already in use")
-        queue = asyncio.Queue()
-        self.connections[id_obj] = queue
-        return queue
+    async def connect(self, id_obj: uuid.UUID) -> Connection:
+        if id_obj in self.connections:
+            if not self.in_progress:
+                raise HTTPException(418, "ID already in use")
+            connection = self.connections[id_obj]
+            if connection.connected:
+                raise HTTPException(418, "ID is already connected")
+            connection.connected = True
+            logger.debug(f"Game {self.name} - Reconnection of existing connection, ID: {id_obj.hex}")
+        else:
+            connection = Connection(id_obj=id_obj)
+            self.connections[id_obj] = connection
+            logger.debug(f"Game {self.name} - New connection added, ID: {id_obj.hex}")
+        if self.inactive_since:
+            self.inactive_since = None
+            logger.debug(f"Game {self.name} - Marked as active")
+        return connection
 
     async def disconnect(self, id_obj: uuid.UUID):
-        del self.connections[id_obj]
+        if id_obj in self.connections:
+            connection = self.connections[id_obj]
+            connection.active = False
+            logger.debug(f"Game {self.name} - Connection marked as inactive, ID: {id_obj.hex}")
+            if not self.in_progress:
+                del self.connections[id_obj]
+                logger.debug(f"Game {self.name} - Connection removed, ID: {id_obj.hex}")
+            if not any(c.connected for c in self.connections):
+                self.inactive_since = datetime.datetime.now()
 
-    async def handle_post(self, message: GamePost):
+    async def handle_post(self, id_obj: uuid.UUID, message: GamePost):
+        if id_obj not in self.connections:
+            raise HTTPException(418, "You are not connected to this game")
         await self.phase.handle_post(message)
 
 
 async def game_inactivity_timer(game_obj: Game, seconds: int):
     if game_obj in games.values() and game_obj.inactive_since:
-        print("inactivity timer started for %s" % game_obj.name)
+        logger.debug(
+            f"Inactivity timer - Game {game_obj.name} will be deleted after {seconds} seconds without activity")
         await asyncio.sleep(seconds)
         if game_obj.inactive_since and \
                 datetime.datetime.now() - game_obj.inactive_since > datetime.timedelta(seconds=seconds):
@@ -93,9 +134,11 @@ async def game_inactivity_timer(game_obj: Game, seconds: int):
                 async with session.begin():
                     query = delete(db.Game).filter(db.Game.name == game_obj.name)
                     await session.execute(query)
-                del games[game_obj.name]
+            del games[game_obj.name]
+            logger.debug(f"Inactivity timer - Game {game_obj.name} has been deleted")
         else:
-            print("inactivity timer cancelled for %s" % game_obj.name)
+            logger.debug(f"Inactivity timer - Game {game_obj.name} was active in the past {seconds} seconds "
+                         "and will not be deleted")
 
 ###############
 # API STARTUP #
@@ -125,6 +168,7 @@ async def depends_id_obj(id: str = Cookie(None)) -> uuid.UUID:
         id_obj = uuid.UUID(id, version=4)
     except (TypeError, ValueError):
         id_obj = uuid.uuid4()
+        logger.debug(f"Connection ID - Invalid or no ID provided, newly generated ID: {id_obj.hex}")
     return id_obj
 
 
@@ -150,6 +194,7 @@ async def create_game(game: GameCreate):
 
     new_game = Game(name=game.name)
     games[game.name] = new_game
+    logger.debug(f"Create game - New game {game.name} created")
     asyncio.create_task(game_inactivity_timer(new_game, 30))
 
 
@@ -159,23 +204,24 @@ async def get_games() -> GameList:
 
 
 @app.post('/games/{game_name}')
-async def post_game(post: GamePost, game_obj: Game = Depends(depends_game_obj)):
-    await game_obj.handle_post(post)
+async def post_game(post: GamePost, game_obj: Game = Depends(depends_game_obj),
+                    id_obj: uuid.UUID = Depends(depends_id_obj)):
+    await game_obj.handle_post(id_obj, post)
 
 
 @app.get('/games/{game_name}')
 async def message_stream(game_obj: Game = Depends(depends_game_obj),
                          id_obj: uuid.UUID = Depends(depends_id_obj)) -> GameUpdate:
-    queue = await game_obj.connect(id_obj)
+    connection = await game_obj.connect(id_obj)
 
     async def event_generator():
         try:
             while True:
-                message = await queue.get()
+                message = await connection.listen_for_updates()
                 yield message.dict()
-                queue.task_done()
         except asyncio.CancelledError:
-            game_obj.disconnect(id_obj)
+            await game_obj.disconnect(id_obj)
+            asyncio.create_task(game_inactivity_timer(game_obj, 30))
 
     response = EventSourceResponse(event_generator(), ping=60)
     response.set_cookie(key="id", value=id_obj.hex)
