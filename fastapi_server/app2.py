@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Depends, Cookie, HTTPException, Path
+from fastapi import FastAPI, Depends, Cookie, HTTPException, Path, Request
+from fastapi.staticfiles import StaticFiles
 from sse_starlette import EventSourceResponse
-from pydantic import BaseModel
-from typing import Literal, Dict, List
+from pydantic import BaseModel, create_model
+from typing import Literal, Dict, List, Optional, ClassVar
 from sqlalchemy import select, delete
 from uvicorn.logging import ColourizedFormatter
 import asyncio
@@ -29,23 +30,78 @@ logger.addHandler(handler)
 ###################
 
 
-class GameUpdate(BaseModel):
-    event: Literal["player_update", "phase_update"]
-    data: Dict
+class GameUpdateBase(BaseModel):
     retry: int = 5
 
 
-class GamePost(BaseModel):
-    event: str
+class GameUpdateMessage(GameUpdateBase):
+    event: Literal["message"]
+    data: str
+
+
+class GameUpdatePhase(GameUpdateBase):
+    event: Literal["phase_update"]
     data: Dict
+
+
+class GameUpdatePlayers(GameUpdateBase):
+    event: Literal["player_update"]
+    data: Dict
+
+
+GameUpdate = GameUpdateMessage | GameUpdatePhase | GameUpdatePlayers
 
 
 class GameCreate(BaseModel):
     name: str
 
 
+class GamePostJoin(BaseModel):
+    class GamePostJoinPlayer(BaseModel):
+        type: Literal["player"]
+        name: str
+
+    class GamePostJoinSpectator(BaseModel):
+        type: Literal["spectator"]
+
+    DataModels: ClassVar = GamePostJoinPlayer | GamePostJoinSpectator
+
+    event: Literal["join"]
+    data: DataModels
+
+
+class GamePostVote(BaseModel):
+    class GamePostVoteName(BaseModel):
+        name: str
+
+    DataModels: ClassVar = GamePostVoteName
+
+    event: Literal["vote"]
+    data: DataModels
+
+
+roles = {"snor": (int, ...), "nazi": (int, ...)}
+
+
+class GamePostStart(BaseModel):
+    class GamePostStartData(BaseModel):
+        RoleSelection: ClassVar = create_model("RoleSelection", **roles)
+
+        role_selection: RoleSelection
+        options: Optional[Dict]
+
+    DataModels: ClassVar = GamePostStartData
+
+    event: Literal["start"]
+    data: GamePostStartData
+
+
+GamePost = GamePostJoin | GamePostVote | GamePostStart
+
+
 class GameList(BaseModel):
     games: List[str]
+
 
 #################
 # PHASE CLASSES #
@@ -53,17 +109,23 @@ class GameList(BaseModel):
 
 
 class Phase:
-    async def handle_post(self, message: GamePost):
+    def __init__(self, game: "Game") -> None:
+        self.game = game
+
+    async def handle_post(self, conn: "Connection", message: GamePost):
         try:
             handler = getattr(self, f"on_{message.event}")
-            await handler(message.data)
+            await handler(conn, message.data)
         except AttributeError:
             raise HTTPException(418, "Invalid event name")
 
+    async def on_join(self, conn: "Connection", data: GamePostJoin.DataModels):
+        conn.is_spectator = True
+
 
 class Lobby(Phase):
-    async def on_join(self, data: Dict):
-        print("I want to join!")
+    async def on_join(self, conn: "Connection", data: GamePostJoin.DataModels):
+        pass
 
 ##############
 # GAME CLASS #
@@ -75,9 +137,14 @@ class Connection:
         self.id_obj = id_obj
         self.queue = asyncio.Queue()
         self.active = True
+        self.is_player = False
+        self.is_spectator = False
 
-    async def listen_for_updates(self) -> GameUpdate:
+    async def listen_for_updates(self) -> GameUpdateMessage:
         return await self.queue.get()
+
+    async def send_message(self, message: str) -> None:
+        await self.queue.put(GameUpdateMessage(event="message", data=message))
 
 
 class Game:
@@ -86,24 +153,30 @@ class Game:
         self.connections = {}
         self.in_progress = False
         self.inactive_since = datetime.datetime.now()
-        self.phase = Lobby()
+        self.phase = Lobby(game=self)
 
     async def connect(self, id_obj: uuid.UUID) -> Connection:
         if id_obj in self.connections:
+            # Scenario 1: Game has not started and ID is already in use
             if not self.in_progress:
                 raise HTTPException(418, "ID already in use")
             connection = self.connections[id_obj]
-            if connection.connected:
+            # Scenario 2: Game has started and the player with this ID is already connected
+            if connection.active:
                 raise HTTPException(418, "ID is already connected")
-            connection.connected = True
+            connection.active = True
             logger.debug(f"Game {self.name} - Reconnection of existing connection, ID: {id_obj.hex}")
         else:
+            # Scenario 3: This is a new ID
             connection = Connection(id_obj=id_obj)
             self.connections[id_obj] = connection
             logger.debug(f"Game {self.name} - New connection added, ID: {id_obj.hex}")
+        # Mark game as active if it was inactive
         if self.inactive_since:
             self.inactive_since = None
             logger.debug(f"Game {self.name} - Marked as active")
+        # Send the connection a confirmation message
+        await connection.send_message("connected!")
         return connection
 
     async def disconnect(self, id_obj: uuid.UUID):
@@ -114,13 +187,13 @@ class Game:
             if not self.in_progress:
                 del self.connections[id_obj]
                 logger.debug(f"Game {self.name} - Connection removed, ID: {id_obj.hex}")
-            if not any(c.connected for c in self.connections):
+            if not any(c.active for c in self.connections.values()):
                 self.inactive_since = datetime.datetime.now()
 
     async def handle_post(self, id_obj: uuid.UUID, message: GamePost):
         if id_obj not in self.connections:
             raise HTTPException(418, "You are not connected to this game")
-        await self.phase.handle_post(message)
+        await self.phase.handle_post(self.connections[id_obj], message)
 
 
 async def game_inactivity_timer(game_obj: Game, seconds: int):
@@ -166,6 +239,7 @@ async def startup():
 async def depends_id_obj(id: str = Cookie(None)) -> uuid.UUID:
     try:
         id_obj = uuid.UUID(id, version=4)
+        logger.debug(f"Connection ID - Valid ID provided, ID: {id_obj.hex}")
     except (TypeError, ValueError):
         id_obj = uuid.uuid4()
         logger.debug(f"Connection ID - Invalid or no ID provided, newly generated ID: {id_obj.hex}")
@@ -174,7 +248,7 @@ async def depends_id_obj(id: str = Cookie(None)) -> uuid.UUID:
 
 async def depends_game_obj(game_name: str = Path(...)) -> Game:
     if game_name not in games:
-        raise HTTPException(418, "Game not found")
+        raise HTTPException(404, "Game not found")
     return games[game_name]
 
 #################
@@ -210,8 +284,9 @@ async def post_game(post: GamePost, game_obj: Game = Depends(depends_game_obj),
 
 
 @app.get('/games/{game_name}')
-async def message_stream(game_obj: Game = Depends(depends_game_obj),
-                         id_obj: uuid.UUID = Depends(depends_id_obj)) -> GameUpdate:
+async def game_message_stream(request: Request,
+                              game_obj: Game = Depends(depends_game_obj),
+                              id_obj: uuid.UUID = Depends(depends_id_obj)) -> GameUpdate:
     connection = await game_obj.connect(id_obj)
 
     async def event_generator():
@@ -224,5 +299,7 @@ async def message_stream(game_obj: Game = Depends(depends_game_obj),
             asyncio.create_task(game_inactivity_timer(game_obj, 30))
 
     response = EventSourceResponse(event_generator(), ping=60)
-    response.set_cookie(key="id", value=id_obj.hex)
+    response.set_cookie(key="id", value=id_obj.hex, path=request.url.path)
     return response
+
+app.mount("/test", StaticFiles(directory="fastapi_server/test_html", html=True), name="test_html")
