@@ -1,4 +1,4 @@
 import uvicorn
 
-from .app2 import app
+from .app import app
 uvicorn.run(app)
