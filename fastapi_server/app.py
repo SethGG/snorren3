@@ -3,7 +3,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
 from sse_starlette import EventSourceResponse
 from pydantic import BaseModel, create_model, Field, validator, PrivateAttr
-from typing import Literal, Dict, List, Optional, ClassVar
+from typing import Literal, Dict, List, Optional, ClassVar, Iterable
 from uvicorn.logging import ColourizedFormatter
 from dataclasses import dataclass, field
 import asyncio
@@ -51,6 +51,7 @@ class GameUpdatePhase(GameUpdateBase):
 class GameUpdatePlayers(GameUpdateBase):
     class GameUpdatePlayersPlayer(BaseModel):
         name: str
+        connected: bool
         role: str = "unknown"
         lover: bool = False
         mayor: bool = False
@@ -211,15 +212,21 @@ class Game(BaseModel):
 
     def get_player_info(self, id_obj) -> list[GameUpdatePlayers.DataModel]:
         if id_obj in self.connections:
-            return [GameUpdatePlayers.DataModel(name=player.name) for player in self.players.values()]
+            return [
+                GameUpdatePlayers.DataModel(name=player.name,
+                                            connected=(id_obj in self.connections)) for id_obj, player in self.players.items()]
 
-    async def send_message_to_all(self, message: str) -> None:
-        for connection in self.connections.values():
-            await connection.send_message(message)
+    async def send_message_to(self, id_objs: Iterable[uuid.UUID], message: str) -> None:
+        for id_obj in self.spectators.union(id_objs):
+            if id_obj in self.connections:
+                connection = self.connections[id_obj]
+                await connection.send_message(message)
 
-    async def send_player_update_to_all(self) -> None:
-        for id_obj, connection in self.connections.items():
-            await connection.send_player_update(self.get_player_info(id_obj))
+    async def send_player_update_to(self, id_objs: Iterable[uuid.UUID]) -> None:
+        for id_obj in self.spectators.union(id_objs):
+            if id_obj in self.connections:
+                connection = self.connections[id_obj]
+                await connection.send_player_update(self.get_player_info(id_obj))
 
     async def connect(self, id_obj: uuid.UUID) -> Connection:
         if id_obj in self.connections:
@@ -232,7 +239,7 @@ class Game(BaseModel):
             logger.debug(f"Game {self.name} - Marked as active")
         await connection.send_message(f"Welcome to {self.name}!")
         if id_obj in self.players:
-            await self.send_player_update_to_all()
+            await self.send_player_update_to(self.connections)
         else:
             await connection.send_player_update(self.get_player_info(id_obj))
         return connection
@@ -256,6 +263,7 @@ class Game(BaseModel):
                 print(self.spectators)
             elif data.type == "player" and not self.in_progress:
                 self.players[id_obj] = Player(name=data.name)
+                await self.send_player_update_to(self.connections)
 
     async def handle_post(self, id_obj: uuid.UUID, message: GamePost):
         if id_obj not in self.connections:
